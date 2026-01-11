@@ -466,8 +466,8 @@ fn main() {
 
             run_tool_in_dtmgr(["mktexlsr"])
                 .status().expect("should be able to run mktexlsr");
-            run_tool_in_dtmgr(["fmtutil-sys", "--all"])
-                .status().expect("should be able to run fmtutil-sys --all");
+            run_tool_in_dtmgr(["fmtutil-sys", "--missing"])
+                .status().expect("should be able to run fmtutil-sys --missing");
             run_tool_in_dtmgr(["updmap-sys", "--syncwithtrees"])
                 .status().expect("should be able to run updmap-sys --syncwithtrees");
             run_tool_in_dtmgr(["updmap-sys"])
