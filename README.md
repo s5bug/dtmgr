@@ -1,6 +1,7 @@
 # dtmgr
 
-**WARNING** this is very experimental and might completely screw up your TeX
+> [!WARNING]
+> this is very experimental and might completely screw up your TeX
 Live install. use at your own risk.
 
 ## motivation
@@ -14,7 +15,8 @@ tool that could handle the whole process automatically.
 
 ## usage
 
-> note for Windows users: you should use `gpedit` to change Windows Settings →
+> [!NOTE]
+> for Windows users: you should use `gpedit` to change Windows Settings →
 > Security Settings → Local Policy → User Rights → Creating Symbolic Links so
 > that you can create symbolic links without administrator privileges.
 > `dtmgr install` will fail otherwise.
@@ -37,6 +39,12 @@ Finally, you can run any command in the new TeX environment using `dtmgr run`:
 ```
 dtmgr run lualatex main.tex
 ```
+
+> [!WARNING]
+> if you are using [dtmgr-action](https://github.com/s5bug/dtmgr-action) in CI,
+> you do not use `dtmgr run` for CI commands. this means if using a build file,
+> you likely want to i.e. manually `dtmgr run make` rather than having
+> `Makefile` specify `dtmgr run` as part of steps.
 
 ## TODO
 
