@@ -1,6 +1,7 @@
 use std::collections::BTreeMap as Map;
 use std::collections::BTreeSet as Set;
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use clap::{Parser, Subcommand};
@@ -564,14 +565,37 @@ fn run() -> Result<ExitCode, DtMgrError> {
             make_config_and_var(&dot_dir)?;
 
             // TODO turn these expects into errors
-            run_tool_in_dtmgr(["mktexlsr"])?
-                .status().expect("should be able to run mktexlsr");
-            run_tool_in_dtmgr(["fmtutil-sys", "--missing"])?
-                .status().expect("should be able to run fmtutil-sys --missing");
-            run_tool_in_dtmgr(["updmap-sys", "--syncwithtrees"])?
-                .status().expect("should be able to run updmap-sys --syncwithtrees");
-            run_tool_in_dtmgr(["updmap-sys"])?
-                .status().expect("should be able to run updmap-sys");
+            let mktexlsr_status = run_tool_in_dtmgr(["mktexlsr"])?
+                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            if !mktexlsr_status.success() {
+                return Err(DtMgrError::CommandStatus { command: "mktexlsr".to_owned(), code: mktexlsr_status.code() })
+            }
+
+            let fmtutil_missing_status = run_tool_in_dtmgr(["fmtutil-sys", "--missing", "--no-strict"])?
+                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            if !fmtutil_missing_status.success() {
+                return Err(DtMgrError::CommandStatus { command: "fmtutil-sys --missing --no-strict".to_owned(), code: fmtutil_missing_status.code() })
+            }
+
+            let mut updmap_sync = run_tool_in_dtmgr(["updmap-sys", "--syncwithtrees"])?
+                .stdin(Stdio::piped())
+                .spawn()
+                .map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            let updmap_sync_stdin = updmap_sync.stdin.as_mut()
+                .expect("should be able to open stdin of subprocess");
+            updmap_sync_stdin.write_all(b"y\n")
+                .expect("should be able to write to stdin of subprocess");
+            let updmap_sync_status = updmap_sync.wait()
+                .map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            if !updmap_sync_status.success() {
+                return Err(DtMgrError::CommandStatus { command: "updmap-sys --syncwithtrees".to_owned(), code: updmap_sync_status.code() })
+            }
+
+            let updmap_status = run_tool_in_dtmgr(["updmap-sys"])?
+                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            if !updmap_status.success() {
+                return Err(DtMgrError::CommandStatus { command: "updmap-sys".to_owned(), code: updmap_status.code() })
+            }
 
             make_dot_dir_version_file(&dot_dir, &config)?;
 
