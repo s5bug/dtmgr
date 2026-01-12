@@ -1,6 +1,6 @@
 use std::collections::BTreeMap as Map;
 use std::collections::BTreeSet as Set;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
@@ -13,11 +13,6 @@ use thiserror::Error;
 const KPSE_SEPARATOR: char = ';';
 #[cfg(unix)]
 const KPSE_SEPARATOR: char = ':';
-
-#[cfg(windows)]
-const PATH_ENV_SEPARATOR: &str = ";";
-#[cfg(unix)]
-const PATH_ENV_SEPARATOR: &str = ":";
 
 const CONFIG_FILE_NAME: &str = "dtmgr.toml";
 
@@ -464,11 +459,11 @@ fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform:
     Ok(())
 }
 
-fn replace_path_env(old_path_env: impl AsRef<str>, target: impl AsRef<Path>, replacement: impl AsRef<Path>) -> String {
+fn replace_path_env(old_path_env: impl AsRef<OsStr>, target: impl AsRef<Path>, replacement: impl AsRef<Path>) -> OsString {
     let mut result = Vec::new();
 
     // TODO check for non-existence of target
-    for part in old_path_env.as_ref().split(PATH_ENV_SEPARATOR) {
+    for part in std::env::split_paths(old_path_env.as_ref()) {
         let entry = PathBuf::from(part);
         let new_path = if entry.starts_with(&target) {
             let relative = entry.strip_prefix(&target)
@@ -477,10 +472,10 @@ fn replace_path_env(old_path_env: impl AsRef<str>, target: impl AsRef<Path>, rep
         } else {
             entry
         };
-        result.push(new_path.to_str().expect("path created from str not representable as str").to_owned());
+        result.push(new_path.into_os_string());
     }
 
-    result.join(PATH_ENV_SEPARATOR)
+    std::env::join_paths(result).expect("replacing path shouldn't create invalid path")
 }
 
 fn run_tool_in_dtmgr<I, S>(exe_and_args: I) -> Result<Command, DtMgrError>
