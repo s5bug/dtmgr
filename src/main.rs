@@ -550,7 +550,10 @@ fn run() -> Result<ExitCode, DtMgrError> {
             // TODO log progress here
             make_dot_dir(&dot_dir)?;
 
-            install_packages_globally(&config.dependencies)?;
+            match install_packages_globally(&config.dependencies) {
+                Err(DtMgrError::CommandStatus { code: Some(2), .. }) => println!("not performing install assuming tlmgr needs sudo. continuing..."),
+                other => other?,
+            };
 
             let dep_tree = build_dependency_tree(&config, &platform)?;
             for tlpobj in dep_tree.values() {
