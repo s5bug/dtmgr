@@ -156,6 +156,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr> {
     let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile");
+    cmd.arg("-NonInteractive");
     cmd.arg("-c");
 
     let mut command_string = String::new();
