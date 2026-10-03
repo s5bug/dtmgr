@@ -295,10 +295,27 @@ fn make_dot_dir(dot_dir: impl AsRef<Path>) -> Result<(), DtMgrError> {
 }
 
 fn make_config_and_var(dot_dir: impl AsRef<Path>) -> Result<(), DtMgrError> {
-    std::fs::create_dir(dot_dir.as_ref().join("texmf-config"))
-        .map_err(|e| DtMgrError::CreateDirectory { dir: dot_dir.as_ref().to_owned(), source: e })?;
-    std::fs::create_dir(dot_dir.as_ref().join("texmf-var"))
-        .map_err(|e| DtMgrError::CreateDirectory { dir: dot_dir.as_ref().to_owned(), source: e })
+    let texmf_config = dot_dir.as_ref().join("texmf-config");
+    std::fs::create_dir(&texmf_config)
+        .map_err(|e| DtMgrError::CreateDirectory { dir: texmf_config, source: e })?;
+    let texmf_var = dot_dir.as_ref().join("texmf-var");
+    std::fs::create_dir(&texmf_var)
+        .map_err(|e| DtMgrError::CreateDirectory { dir: texmf_var, source: e })?;
+
+    // luaotfload parses $XDG_CONFIG_HOME/luaotfload/luaotfload.conf
+    let xdg_config_luaotfload = dot_dir.as_ref().join("xdg-config").join("luaotfload");
+    std::fs::create_dir_all(&xdg_config_luaotfload)
+        .map_err(|e| DtMgrError::CreateDirectory { dir: xdg_config_luaotfload.clone(), source: e })?;
+
+    // see luaotfload/doc/luaotfload.conf.rst
+    let luaotfload_conf = "[db]\nlocation-precedence = texmf\n";
+
+    // luaotfload checks $XDG_CONFIG_HOME/luaotfload.conf
+    let luaotfload_conf_path = xdg_config_luaotfload.join("luaotfload.conf");
+    std::fs::write(&luaotfload_conf_path, luaotfload_conf)
+        .map_err(|e| DtMgrError::WriteFile { file: luaotfload_conf_path, source: e })?;
+
+    Ok(())
 }
 
 fn make_dot_dir_version_file(dot_dir: impl AsRef<Path>, config: &DtMgrConfig) -> Result<(), DtMgrError> {
@@ -400,6 +417,9 @@ fn create_texlive_symlink(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>
         .map_err(|e| DtMgrError::CreateSymlink { src: full_old, dst: full_new, source: e })
 }
 
+// see luaotfload/src/luaotfload-database.lua
+// FIXME https://github.com/lunarmodules/luafilesystem/issues/184
+const FONT_EXTENSIONS: [&str; 5] = ["otf",  "ttc", "ttf", "afm", "pfb"];
 fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform: impl AsRef<str>, pkg: &TlPObjInfo) -> Result<(), DtMgrError> {
     if let Some(binfiles) = &pkg.binfiles {
         if let Some(arch_binfiles) = binfiles.get(platform.as_ref()) {
@@ -428,7 +448,7 @@ fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform:
             if parse.ends_with("updmap.cfg") {
                 // updmap.cfg needs to be copied to be updated with updmap-sys --syncwithtrees
                 create_texlive_copy(&old_root, &new_root, parse)?;
-            } else if cfg!(windows) && parse.extension().is_some_and(|s| s.to_str() == Some("otf")) {
+            } else if cfg!(windows) && parse.extension().is_some_and(|s| s.to_str().is_some_and(|s| FONT_EXTENSIONS.contains(&s))) {
                 // https://github.com/lunarmodules/luafilesystem/issues/184
                 create_texlive_hardlink(&old_root, &new_root, parse)?;
             } else {
@@ -510,6 +530,18 @@ where
     texmfcnf.push(KPSE_SEPARATOR);
     texmfcnf.push_str(dot_dir_web2c_str);
     cmd.env("TEXMFCNF", texmfcnf);
+
+    cmd.env("TEXMFVAR", dot_dir.join("texmf-var"));
+
+    // for luaotfload
+    // TODO this is the wrong behavior on non-Windows systems
+    let xdg_config = dot_dir.join("xdg-config");
+    cmd.env("XDG_CONFIG_HOME", &xdg_config);
+
+    // don't index OS fonts, instead require them in the project
+    let dot_dir_nonexistent = dot_dir.join(".if-this-directory-exists-it-needs-to-be-empty-or-dtmgr-will-not-work");
+    let dot_dir_nonexistent_str = dot_dir_nonexistent.to_str().expect(".dtmgr/... should be a str");
+    cmd.env("OSFONTDIR", dot_dir_nonexistent_str);
 
     Ok(cmd)
 }
