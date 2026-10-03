@@ -312,7 +312,6 @@ fn make_config_and_var(dot_dir: impl AsRef<Path>) -> Result<(), DtMgrError> {
     // see luaotfload/doc/luaotfload.conf.rst
     let luaotfload_conf = "[db]\nlocation-precedence = texmf\n";
 
-    // luaotfload checks $XDG_CONFIG_HOME/luaotfload.conf
     let luaotfload_conf_path = xdg_config_luaotfload.join("luaotfload.conf");
     std::fs::write(&luaotfload_conf_path, luaotfload_conf)
         .map_err(|e| DtMgrError::WriteFile { file: luaotfload_conf_path, source: e })?;
