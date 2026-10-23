@@ -21,6 +21,10 @@ tool that could handle the whole process automatically.
 > that you can create symbolic links without administrator privileges.
 > `dtmgr install` will fail otherwise.
 
+> [!Note]
+> for Nix users: TeX Live as installed by Nix is immutable. `dtmgr` has a
+> special `--nix` flag for Nix usage, seen in `package.nix`.
+
 First, create a `dtmgr.toml` in the root of your TeX project. It should list
 packages under `dependencies`:
 
@@ -49,6 +53,4 @@ dtmgr run lualatex main.tex
 ## TODO
 
 - implement progress logging
-- automatically say yes to `updmap --syncwithtrees`
 - replace all the `.expect`s with actual error printing
-- create GitHub Action that reads the TOML to configure the global TeX Live install in CI

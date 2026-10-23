@@ -1,12 +1,13 @@
+use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap as Map;
 use std::collections::BTreeSet as Set;
+use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
-use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -21,6 +22,9 @@ const CONFIG_FILE_NAME: &str = "dtmgr.toml";
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    #[arg(long)]
+    nix: bool,
 }
 
 #[derive(Subcommand)]
@@ -34,71 +38,82 @@ enum Commands {
 
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
-    }
+    },
 }
 
 #[derive(Error, Debug)]
 pub enum DtMgrError {
     #[error("unable to parse configuration file `dtmgr.toml`")]
     ParseConfig {
-        #[source] source: toml::de::Error
+        #[source]
+        source: toml::de::Error,
     },
     #[error("unable to read file ({path})")]
     ReadFile {
         path: PathBuf,
-        #[source] source: std::io::Error
+        #[source]
+        source: std::io::Error,
     },
     #[error("unable to hash config")]
     HashConfig {
-        #[source] source: postcard::Error
+        #[source]
+        source: postcard::Error,
     },
-    #[error("system failure executing a command")]
+    #[error("system failure executing a command `{command}`")]
     CommandExecution {
-        #[source] source: std::io::Error
+        command: String,
+        #[source]
+        source: std::io::Error,
     },
     #[error("command `{command}` exited with non-zero exit code ({code:?})")]
-    CommandStatus {
-        command: String,
-        code: Option<i32>,
-    },
+    CommandStatus { command: String, code: Option<i32> },
     #[error("failed to parse json")]
     JsonParse {
-        #[source] source: serde_json::Error
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to generate json")]
+    JsonSerialize {
+        #[source]
+        source: serde_json::Error,
     },
     #[error("failed to retrieve current directory")]
     CurrentDirectory {
-        #[source] source: std::io::Error
+        #[source]
+        source: std::io::Error,
     },
     #[error("unable to find dtmgr.toml in current directory ({cwd}) or any of its parents")]
-    FindConfig {
-        cwd: PathBuf
-    },
+    FindConfig { cwd: PathBuf },
     #[error("unable to create directory ({dir})")]
     CreateDirectory {
         dir: PathBuf,
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     #[error("unable to write to file ({file})")]
     WriteFile {
         file: PathBuf,
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     #[error("unable to create symlink (src: {src}, dst: {dst})")]
     CreateSymlink {
         src: PathBuf,
         dst: PathBuf,
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     #[error("unable to remove directory ({dir})")]
     RemoveDirectory {
         dir: PathBuf,
-        #[source] source: std::io::Error,
-    }
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Hash)]
 pub struct DtMgrConfig {
-    dependencies: Set<String>
+    dependencies: Set<String>,
 }
 
 // https://svn.tug.org:8369/texlive/trunk/Master/tlpkg/doc/json-formats.txt?view=markup
@@ -154,7 +169,8 @@ pub struct TlPObjInfoCatalogueData {
 fn cmd_crossplatform_static_args<I, S>(exe_and_args: I) -> Command
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<OsStr> {
+    S: AsRef<OsStr>,
+{
     let mut cmd = Command::new("powershell");
     cmd.arg("-NoProfile");
     cmd.arg("-NonInteractive");
@@ -178,7 +194,8 @@ where
 fn cmd_crossplatform_static_args<I, S>(exe_and_args: I) -> Command
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<OsStr> {
+    S: AsRef<OsStr>,
+{
     let mut as_iter = exe_and_args.into_iter();
     let mut cmd = Command::new(as_iter.next().expect("exe_and_args should be nonempty"));
     cmd.args(as_iter);
@@ -189,78 +206,122 @@ where
 fn cmd_crossplatform_static_args<I, S>(exe_and_args: I) -> Command
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<OsStr> {
+    S: AsRef<OsStr>,
+{
     compile_error!("not sure how to spawn a command on this platform")
 }
 
 // TODO all of these .expect s should be replaced with proper tracing
 
 fn get_texlive_root() -> Result<PathBuf, DtMgrError> {
-    let kpse_out = cmd_crossplatform_static_args(["kpsewhich", "-var-value=TEXMFROOT"])
-        .output().map_err(|e| DtMgrError::CommandExecution { source: e })?;
+    let exe_and_args = ["kpsewhich", "-var-value=TEXMFROOT"];
+    let kpse_out = cmd_crossplatform_static_args(exe_and_args)
+        .output()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: exe_and_args.join(" "),
+            source: e,
+        })?;
 
     if kpse_out.status.success() {
-        Ok(PathBuf::from(String::from_utf8(kpse_out.stdout).expect("kpsewhich output is utf-8").trim()))
+        Ok(PathBuf::from(
+            String::from_utf8(kpse_out.stdout)
+                .expect("kpsewhich output is utf-8")
+                .trim(),
+        ))
     } else {
-        Err(DtMgrError::CommandStatus { command: "kpsewhich -var-value=TEXMFROOT".to_owned(), code: kpse_out.status.code() })
+        Err(DtMgrError::CommandStatus {
+            command: exe_and_args.join(" "),
+            code: kpse_out.status.code(),
+        })
     }
 }
 
 fn get_texlive_platform() -> Result<String, DtMgrError> {
-    let tlmgr_out = cmd_crossplatform_static_args(["tlmgr", "print-platform"])
-        .output().map_err(|e| DtMgrError::CommandExecution { source: e })?;
+    let exe_and_args = ["tlmgr", "print-platform"];
+    let tlmgr_out = cmd_crossplatform_static_args(exe_and_args)
+        .output()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: exe_and_args.join(" "),
+            source: e,
+        })?;
 
     if tlmgr_out.status.success() {
-        Ok(String::from_utf8(tlmgr_out.stdout).expect("tlmgr output is utf-8").trim().to_owned())
+        Ok(String::from_utf8(tlmgr_out.stdout)
+            .expect("tlmgr output is utf-8")
+            .trim()
+            .to_owned())
     } else {
-        Err(DtMgrError::CommandStatus { command: "tlmgr print-platform".to_owned(), code: tlmgr_out.status.code() })
+        Err(DtMgrError::CommandStatus {
+            command: "tlmgr print-platform".to_owned(),
+            code: tlmgr_out.status.code(),
+        })
     }
 }
 
 fn install_packages_globally<'a, I, S>(packages: I) -> Result<(), DtMgrError>
 where
     I: IntoIterator<Item = &'a S>,
-    S: AsRef<str> + 'a {
+    S: AsRef<str> + 'a,
+{
     let mut packages_vec: Vec<&'a str> = Vec::new();
     for package in packages.into_iter() {
         packages_vec.push(package.as_ref());
     }
 
-    let mut cmd = cmd_crossplatform_static_args(["tlmgr", "install"].into_iter().chain(packages_vec.iter().copied()));
-    let out = cmd.status()
-        .map_err(|e| DtMgrError::CommandExecution { source: e })?;
+    let mut cmd = cmd_crossplatform_static_args(
+        ["tlmgr", "install"]
+            .into_iter()
+            .chain(packages_vec.iter().copied()),
+    );
+    let out = cmd.status().map_err(|e| DtMgrError::CommandExecution {
+        command: "tlmgr install ".to_owned() + packages_vec.join(" ").as_str(),
+        source: e,
+    })?;
 
     if out.success() {
         Ok(())
     } else {
-        Err(DtMgrError::CommandStatus { command: "tlmgr install ".to_owned() + packages_vec.join(" ").as_str(), code: out.code() })
+        Err(DtMgrError::CommandStatus {
+            command: "tlmgr install ".to_owned() + packages_vec.join(" ").as_str(),
+            code: out.code(),
+        })
     }
 }
 
 fn info_about_packages<'a, I, S>(packages: I) -> Result<Vec<TlPObjInfo>, DtMgrError>
 where
     I: IntoIterator<Item = &'a S>,
-    S: AsRef<str> + 'a {
+    S: AsRef<str> + 'a,
+{
     let mut packages_vec: Vec<&'a str> = Vec::new();
     for package in packages.into_iter() {
         packages_vec.push(package.as_ref());
     }
 
-    let mut cmd = cmd_crossplatform_static_args(["tlmgr", "info", "--json"].into_iter().chain(packages_vec.iter().copied()));
-    let out = cmd.output()
-        .map_err(|e| DtMgrError::CommandExecution { source: e })?;
+    let mut cmd = cmd_crossplatform_static_args(
+        ["tlmgr", "info", "--json"]
+            .into_iter()
+            .chain(packages_vec.iter().copied()),
+    );
+    let out = cmd.output().map_err(|e| DtMgrError::CommandExecution {
+        command: "tlmgr info --json".to_owned() + packages_vec.join(" ").as_str(),
+        source: e,
+    })?;
     if out.status.success() {
         let json = serde_json::from_slice::<Vec<TlPObjInfo>>(out.stdout.as_slice())
             .map_err(|e| DtMgrError::JsonParse { source: e })?;
         Ok(json)
     } else {
-        Err(DtMgrError::CommandStatus { command: "tlmgr info --json ".to_owned() + packages_vec.join(" ").as_str(), code: out.status.code() })
+        Err(DtMgrError::CommandStatus {
+            command: "tlmgr info --json ".to_owned() + packages_vec.join(" ").as_str(),
+            code: out.status.code(),
+        })
     }
 }
 
 fn find_dtmgr_directory() -> Result<PathBuf, DtMgrError> {
-    let initial: &Path = &*std::env::current_dir()
-        .map_err(|e| DtMgrError::CurrentDirectory { source: e })?;
+    let initial: &Path =
+        &*std::env::current_dir().map_err(|e| DtMgrError::CurrentDirectory { source: e })?;
     let mut cwd: Option<&Path> = Some(initial);
 
     while let Some(here) = cwd {
@@ -271,62 +332,84 @@ fn find_dtmgr_directory() -> Result<PathBuf, DtMgrError> {
         cwd = here.parent();
     }
 
-    Err(DtMgrError::FindConfig { cwd: initial.to_owned() })
+    Err(DtMgrError::FindConfig {
+        cwd: initial.to_owned(),
+    })
 }
 
 fn parse_config(path_to_dtmgr_toml: impl AsRef<Path>) -> Result<DtMgrConfig, DtMgrError> {
-    let content = std::fs::read_to_string(&path_to_dtmgr_toml)
-        .map_err(|e| DtMgrError::ReadFile { path: path_to_dtmgr_toml.as_ref().to_owned(), source: e })?;
+    let content =
+        std::fs::read_to_string(&path_to_dtmgr_toml).map_err(|e| DtMgrError::ReadFile {
+            path: path_to_dtmgr_toml.as_ref().to_owned(),
+            source: e,
+        })?;
 
-    toml::from_str(content.as_str())
-        .map_err(|e|DtMgrError::ParseConfig { source: e })
+    toml::from_str(content.as_str()).map_err(|e| DtMgrError::ParseConfig { source: e })
 }
 
 fn hash_config(config: &DtMgrConfig) -> Result<String, DtMgrError> {
     let mut hasher = Sha3_256::new();
-    let config_bytes = postcard::to_stdvec(&config)
-        .map_err(|e| DtMgrError::HashConfig { source: e })?;
+    let config_bytes =
+        postcard::to_stdvec(&config).map_err(|e| DtMgrError::HashConfig { source: e })?;
     hasher.update(config_bytes);
     let hash: [u8; 32] = hasher.finalize().into();
     Ok(hex::encode(hash))
 }
 
 fn make_dot_dir(dot_dir: impl AsRef<Path>) -> Result<(), DtMgrError> {
-    std::fs::create_dir(&dot_dir)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: dot_dir.as_ref().to_owned(), source: e })
+    std::fs::create_dir(&dot_dir).map_err(|e| DtMgrError::CreateDirectory {
+        dir: dot_dir.as_ref().to_owned(),
+        source: e,
+    })
 }
 
 fn make_config_and_var(dot_dir: impl AsRef<Path>) -> Result<(), DtMgrError> {
     let texmf_config = dot_dir.as_ref().join("texmf-config");
-    std::fs::create_dir(&texmf_config)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: texmf_config, source: e })?;
+    std::fs::create_dir(&texmf_config).map_err(|e| DtMgrError::CreateDirectory {
+        dir: texmf_config,
+        source: e,
+    })?;
     let texmf_var = dot_dir.as_ref().join("texmf-var");
-    std::fs::create_dir(&texmf_var)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: texmf_var, source: e })?;
+    std::fs::create_dir(&texmf_var).map_err(|e| DtMgrError::CreateDirectory {
+        dir: texmf_var,
+        source: e,
+    })?;
 
     // luaotfload parses $XDG_CONFIG_HOME/luaotfload/luaotfload.conf
     let xdg_config_luaotfload = dot_dir.as_ref().join("xdg-config").join("luaotfload");
-    std::fs::create_dir_all(&xdg_config_luaotfload)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: xdg_config_luaotfload.clone(), source: e })?;
+    std::fs::create_dir_all(&xdg_config_luaotfload).map_err(|e| DtMgrError::CreateDirectory {
+        dir: xdg_config_luaotfload.clone(),
+        source: e,
+    })?;
 
     // see luaotfload/doc/luaotfload.conf.rst
     let luaotfload_conf = "[db]\nlocation-precedence = texmf\n";
 
     let luaotfload_conf_path = xdg_config_luaotfload.join("luaotfload.conf");
-    std::fs::write(&luaotfload_conf_path, luaotfload_conf)
-        .map_err(|e| DtMgrError::WriteFile { file: luaotfload_conf_path, source: e })?;
+    std::fs::write(&luaotfload_conf_path, luaotfload_conf).map_err(|e| DtMgrError::WriteFile {
+        file: luaotfload_conf_path,
+        source: e,
+    })?;
 
     Ok(())
 }
 
-fn make_dot_dir_version_file(dot_dir: impl AsRef<Path>, config: &DtMgrConfig) -> Result<(), DtMgrError> {
+fn make_dot_dir_version_file(
+    dot_dir: impl AsRef<Path>,
+    config: &DtMgrConfig,
+) -> Result<(), DtMgrError> {
     let version_file = dot_dir.as_ref().join("version");
     let config_hash = hash_config(&config)?;
-    std::fs::write(&version_file, config_hash)
-        .map_err(|e| DtMgrError::WriteFile { file: version_file, source: e })
+    std::fs::write(&version_file, config_hash).map_err(|e| DtMgrError::WriteFile {
+        file: version_file,
+        source: e,
+    })
 }
 
-fn build_dependency_tree(config: &DtMgrConfig, tlmgr_platform: impl AsRef<str>) -> Result<Map<String, TlPObjInfo>, DtMgrError> {
+fn build_dependency_tree(
+    config: &DtMgrConfig,
+    tlmgr_platform: impl AsRef<str>,
+) -> Result<Map<String, TlPObjInfo>, DtMgrError> {
     let mut queue: Set<String> = Set::new();
     queue.insert(String::from("texlive.infra"));
     queue.insert(String::from("kpathsea"));
@@ -349,7 +432,9 @@ fn build_dependency_tree(config: &DtMgrConfig, tlmgr_platform: impl AsRef<str>) 
             if let Some(depends) = &tlpobjinfo.depends {
                 for dep in depends.iter() {
                     let true_dep = if dep.ends_with(".ARCH") {
-                        &(String::from(&dep[0..dep.len() - ".ARCH".len()]) + "." + tlmgr_platform.as_ref())
+                        &(String::from(&dep[0..dep.len() - ".ARCH".len()])
+                            + "."
+                            + tlmgr_platform.as_ref())
                     } else {
                         dep
                     };
@@ -378,57 +463,95 @@ fn create_symlink(target: impl AsRef<Path>, name: impl AsRef<Path>) -> std::io::
     std::os::unix::fs::symlink(target, name)
 }
 
-fn create_texlive_copy(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, relative: impl AsRef<Path>) -> Result<(), DtMgrError> {
+fn create_texlive_copy(
+    old_root: impl AsRef<Path>,
+    new_root: impl AsRef<Path>,
+    relative: impl AsRef<Path>,
+) -> Result<(), DtMgrError> {
     let full_old = old_root.as_ref().join(&relative);
     let full_new = new_root.as_ref().join(relative);
-    let parent_dir = full_new.parent().expect("a path created by a join should have a parent");
-    std::fs::create_dir_all(parent_dir)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: parent_dir.to_owned(), source: e })?;
+    let parent_dir = full_new
+        .parent()
+        .expect("a path created by a join should have a parent");
+    std::fs::create_dir_all(parent_dir).map_err(|e| DtMgrError::CreateDirectory {
+        dir: parent_dir.to_owned(),
+        source: e,
+    })?;
 
-    std::fs::copy(full_old, &full_new)
-        .map_err(|e| DtMgrError::WriteFile { file: full_new, source: e })?;
+    std::fs::copy(full_old, &full_new).map_err(|e| DtMgrError::WriteFile {
+        file: full_new,
+        source: e,
+    })?;
     Ok(())
 }
 
-fn create_texlive_hardlink(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, relative: impl AsRef<Path>) -> Result<(), DtMgrError> {
+fn create_texlive_hardlink(
+    old_root: impl AsRef<Path>,
+    new_root: impl AsRef<Path>,
+    relative: impl AsRef<Path>,
+) -> Result<(), DtMgrError> {
     let full_old = old_root.as_ref().join(&relative);
     let full_new = new_root.as_ref().join(relative);
-    let parent_dir = full_new.parent().expect("a path created by a join should have a parent");
-    std::fs::create_dir_all(parent_dir)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: parent_dir.to_owned(), source: e })?;
+    let parent_dir = full_new
+        .parent()
+        .expect("a path created by a join should have a parent");
+    std::fs::create_dir_all(parent_dir).map_err(|e| DtMgrError::CreateDirectory {
+        dir: parent_dir.to_owned(),
+        source: e,
+    })?;
 
     match std::fs::hard_link(&full_old, &full_new) {
-        Ok(()) => { Ok(()) }
+        Ok(()) => Ok(()),
         Err(_) => {
-            std::fs::copy(full_old, &full_new)
-                .map_err(|e| DtMgrError::WriteFile { file: full_new, source: e })?;
+            std::fs::copy(full_old, &full_new).map_err(|e| DtMgrError::WriteFile {
+                file: full_new,
+                source: e,
+            })?;
             Ok(())
         }
     }
 }
 
-fn create_texlive_symlink(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, relative: impl AsRef<Path>) -> Result<(), DtMgrError> {
+fn create_texlive_symlink(
+    old_root: impl AsRef<Path>,
+    new_root: impl AsRef<Path>,
+    relative: impl AsRef<Path>,
+) -> Result<(), DtMgrError> {
     let full_old = old_root.as_ref().join(&relative);
     let full_new = new_root.as_ref().join(relative);
-    let parent_dir = full_new.parent().expect("a path created by a join should have a parent");
-    std::fs::create_dir_all(parent_dir)
-        .map_err(|e| DtMgrError::CreateDirectory { dir: parent_dir.to_owned(), source: e })?;
+    let parent_dir = full_new
+        .parent()
+        .expect("a path created by a join should have a parent");
+    std::fs::create_dir_all(parent_dir).map_err(|e| DtMgrError::CreateDirectory {
+        dir: parent_dir.to_owned(),
+        source: e,
+    })?;
 
-    create_symlink(&full_old, &full_new)
-        .map_err(|e| DtMgrError::CreateSymlink { src: full_old, dst: full_new, source: e })
+    create_symlink(&full_old, &full_new).map_err(|e| DtMgrError::CreateSymlink {
+        src: full_old,
+        dst: full_new,
+        source: e,
+    })
 }
 
 // see luaotfload/src/luaotfload-database.lua
 // FIXME https://github.com/lunarmodules/luafilesystem/issues/184
-const FONT_EXTENSIONS: [&str; 5] = ["otf",  "ttc", "ttf", "afm", "pfb"];
-fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform: impl AsRef<str>, pkg: &TlPObjInfo) -> Result<(), DtMgrError> {
+const FONT_EXTENSIONS: [&str; 5] = ["otf", "ttc", "ttf", "afm", "pfb"];
+fn do_symlinks(
+    old_root: impl AsRef<Path>,
+    new_root: impl AsRef<Path>,
+    platform: impl AsRef<str>,
+    pkg: &TlPObjInfo,
+) -> Result<(), DtMgrError> {
     if let Some(binfiles) = &pkg.binfiles {
         if let Some(arch_binfiles) = binfiles.get(platform.as_ref()) {
             for file in arch_binfiles.iter() {
                 let parse = PathBuf::from(file);
 
                 // We need to hardlink or copy because abs_path resolves symbolic links
-                if (cfg!(windows) && parse.ends_with("kpsewhich.exe")) || parse.ends_with("kpsewhich") {
+                if (cfg!(windows) && parse.ends_with("kpsewhich.exe"))
+                    || parse.ends_with("kpsewhich")
+                {
                     create_texlive_hardlink(&old_root, &new_root, parse)?;
                 } else {
                     create_texlive_symlink(&old_root, &new_root, parse)?;
@@ -449,7 +572,11 @@ fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform:
             if parse.ends_with("updmap.cfg") {
                 // updmap.cfg needs to be copied to be updated with updmap-sys --syncwithtrees
                 create_texlive_copy(&old_root, &new_root, parse)?;
-            } else if cfg!(windows) && parse.extension().is_some_and(|s| s.to_str().is_some_and(|s| FONT_EXTENSIONS.contains(&s))) {
+            } else if cfg!(windows)
+                && parse
+                    .extension()
+                    .is_some_and(|s| s.to_str().is_some_and(|s| FONT_EXTENSIONS.contains(&s)))
+            {
                 // https://github.com/lunarmodules/luafilesystem/issues/184
                 create_texlive_hardlink(&old_root, &new_root, parse)?;
             } else {
@@ -480,14 +607,19 @@ fn do_symlinks(old_root: impl AsRef<Path>, new_root: impl AsRef<Path>, platform:
     Ok(())
 }
 
-fn replace_path_env(old_path_env: impl AsRef<OsStr>, target: impl AsRef<Path>, replacement: impl AsRef<Path>) -> OsString {
+fn replace_path_env(
+    old_path_env: impl AsRef<OsStr>,
+    target: impl AsRef<Path>,
+    replacement: impl AsRef<Path>,
+) -> OsString {
     let mut result = Vec::new();
 
     // TODO check for non-existence of target
     for part in std::env::split_paths(old_path_env.as_ref()) {
         let entry = PathBuf::from(part);
         let new_path = if entry.starts_with(&target) {
-            let relative = entry.strip_prefix(&target)
+            let relative = entry
+                .strip_prefix(&target)
                 .expect("strip_prefix failed even though starts_with already checked");
             replacement.as_ref().join(relative)
         } else {
@@ -499,38 +631,53 @@ fn replace_path_env(old_path_env: impl AsRef<OsStr>, target: impl AsRef<Path>, r
     std::env::join_paths(result).expect("replacing path shouldn't create invalid path")
 }
 
-fn run_tool_in_dtmgr<I, S>(exe_and_args: I) -> Result<Command, DtMgrError>
+fn run_tool_in_dtmgr<I, S>(
+    dot_dir: &Path,
+    nix: bool,
+    exe_and_args: I,
+) -> Result<Command, DtMgrError>
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<OsStr> {
-    // TODO move this to function parameter
-    let dtmgr_directory = find_dtmgr_directory()?;
-    let dot_dir = dtmgr_directory.join(".dtmgr");
-    let dot_dir_str = dot_dir.to_str()
-        .expect(".dtmgr path should be a str");
+    S: AsRef<OsStr>,
+{
+    let dot_dir_str = dot_dir.to_str().expect(".dtmgr path should be a str");
 
-    let dot_dir_web2c = dot_dir.join("texmf-dist").join("web2c");
-    let dot_dir_web2c_str = dot_dir_web2c.to_str()
-        .expect(".dtmgr/texmf-dist/web2c should be a str");
-
-    // TODO move this to function parameter
-    let old_root = get_texlive_root()?;
+    let mut cmd = cmd_crossplatform_static_args(exe_and_args);
 
     // TODO maybe this needs a cfg()
-    let old_path = std::env::var("PATH")
-        .expect("there should be a PATH variable");
+    let old_path = std::env::var("PATH").expect("there should be a PATH variable");
 
     // TODO move this to function parameter
-    let new_path = replace_path_env(&old_path, &old_root, &dot_dir);
-    let mut cmd = cmd_crossplatform_static_args(exe_and_args);
+    let new_path = if nix {
+        // on Nix, we assume no system-level installation of TeX Live
+        let texlive_bin = dot_dir.join("nix-texlive").join("bin");
+
+        let mut paths = vec![texlive_bin];
+        paths.extend(std::env::split_paths(&old_path));
+        std::env::join_paths(paths)
+            .expect("prepending a path to PATH should result in a valid PATH")
+    } else {
+        // otherwise we have to hide the system installation of TeX utilities
+        // TODO move this to function parameter
+        let old_root = get_texlive_root()?;
+        replace_path_env(&old_path, &old_root, &dot_dir)
+    };
     cmd.env("PATH", &new_path);
 
-    // TODO move this to function parameter
-    let mut texmfcnf = String::new();
-    texmfcnf.push_str(dot_dir_str);
-    texmfcnf.push(KPSE_SEPARATOR);
-    texmfcnf.push_str(dot_dir_web2c_str);
-    cmd.env("TEXMFCNF", texmfcnf);
+    if !nix {
+        // outside a Nix environment, we have to force tools to search the right place for other tools
+        let dot_dir_web2c = dot_dir.join("texmf-dist").join("web2c");
+        let dot_dir_web2c_str = dot_dir_web2c
+            .to_str()
+            .expect(".dtmgr/texmf-dist/web2c should be a str");
+
+        // TODO move this to function parameter
+        let mut texmfcnf = String::new();
+        texmfcnf.push_str(dot_dir_str);
+        texmfcnf.push(KPSE_SEPARATOR);
+        texmfcnf.push_str(dot_dir_web2c_str);
+        cmd.env("TEXMFCNF", texmfcnf);
+    }
 
     cmd.env("TEXMFVAR", dot_dir.join("texmf-var"));
 
@@ -540,29 +687,180 @@ where
     cmd.env("XDG_CONFIG_HOME", &xdg_config);
 
     // don't index OS fonts, instead require them in the project
-    let dot_dir_nonexistent = dot_dir.join(".if-this-directory-exists-it-needs-to-be-empty-or-dtmgr-will-not-work");
-    let dot_dir_nonexistent_str = dot_dir_nonexistent.to_str().expect(".dtmgr/... should be a str");
-    cmd.env("OSFONTDIR", dot_dir_nonexistent_str);
+    let dot_dir_nonexistent =
+        dot_dir.join(".if-this-directory-exists-it-needs-to-be-empty-or-dtmgr-will-not-work");
+    cmd.env("OSFONTDIR", dot_dir_nonexistent);
 
     Ok(cmd)
+}
+
+fn run_tool_in_dtmgr_tlmgr<I, S>(dot_dir: &Path, exe_and_args: I) -> Result<Command, DtMgrError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_tool_in_dtmgr(dot_dir, false, exe_and_args)
+}
+
+fn install_via_tlmgr(
+    config: &DtMgrConfig,
+    dot_dir: &PathBuf,
+    root: &PathBuf,
+    platform: &String,
+) -> Result<(), DtMgrError> {
+    match install_packages_globally(&config.dependencies) {
+        Err(DtMgrError::CommandStatus { code: Some(2), .. }) => {
+            println!("not performing install assuming tlmgr needs sudo. continuing...")
+        }
+        other => other?,
+    };
+
+    let dep_tree = build_dependency_tree(&config, &platform)?;
+    for tlpobj in dep_tree.values() {
+        do_symlinks(&root, &dot_dir, &platform, tlpobj)?;
+    }
+
+    make_config_and_var(&dot_dir)?;
+
+    // TODO turn these expects into errors
+    let mktexlsr_status = run_tool_in_dtmgr_tlmgr(dot_dir, ["mktexlsr"])?
+        .status()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: "mktexlsr".to_owned(),
+            source: e,
+        })?;
+    if !mktexlsr_status.success() {
+        return Err(DtMgrError::CommandStatus {
+            command: "mktexlsr".to_owned(),
+            code: mktexlsr_status.code(),
+        });
+    }
+
+    let fmtutil_missing_status =
+        run_tool_in_dtmgr_tlmgr(dot_dir, ["fmtutil-sys", "--missing", "--no-strict"])?
+            .status()
+            .map_err(|e| DtMgrError::CommandExecution {
+                command: "fmtutil-sys --missing --no-strict".to_owned(),
+                source: e,
+            })?;
+    if !fmtutil_missing_status.success() {
+        return Err(DtMgrError::CommandStatus {
+            command: "fmtutil-sys --missing --no-strict".to_owned(),
+            code: fmtutil_missing_status.code(),
+        });
+    }
+
+    let mut updmap_sync = run_tool_in_dtmgr_tlmgr(dot_dir, ["updmap-sys", "--syncwithtrees"])?
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: "updmap-sys --syncwithtrees".to_owned(),
+            source: e,
+        })?;
+    let updmap_sync_stdin = updmap_sync
+        .stdin
+        .as_mut()
+        .expect("should be able to open stdin of subprocess");
+    updmap_sync_stdin
+        .write_all(b"y\n")
+        .expect("should be able to write to stdin of subprocess");
+    let updmap_sync_status = updmap_sync
+        .wait()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: "updmap-sys --syncwithtrees".to_owned(),
+            source: e,
+        })?;
+    if !updmap_sync_status.success() {
+        return Err(DtMgrError::CommandStatus {
+            command: "updmap-sys --syncwithtrees".to_owned(),
+            code: updmap_sync_status.code(),
+        });
+    }
+
+    let updmap_status = run_tool_in_dtmgr_tlmgr(dot_dir, ["updmap-sys"])?
+        .status()
+        .map_err(|e| DtMgrError::CommandExecution {
+            command: "updmap-sys".to_owned(),
+            source: e,
+        })?;
+    if !updmap_status.success() {
+        Err(DtMgrError::CommandStatus {
+            command: "updmap-sys".to_owned(),
+            code: updmap_status.code(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn install_via_nix(config: &DtMgrConfig, dot_dir: &PathBuf) -> Result<(), DtMgrError> {
+    let dependencies_json = serde_json::to_string(&config.dependencies)
+        .map_err(|source| DtMgrError::JsonSerialize { source })?;
+
+    let nix_expr = /* language=nix */ r#"
+    {
+        pkgs ? import <nixpkgs> {},
+        dependencies
+    }:
+        pkgs.texlive.withPackages (ps: map (n: ps.${n}) (builtins.fromJSON dependencies) )
+    "#;
+
+    let out_link = dot_dir.join("nix-texlive");
+    let out_link_str = out_link
+        .to_str()
+        .expect(".dtmgr/nix-texlive should be a str");
+
+    let mut cmd = cmd_crossplatform_static_args([
+        "nix",
+        "--extra-experimental-features",
+        "nix-command flakes",
+        "build",
+        "--impure",
+        "--out-link",
+        out_link_str,
+        "--argstr",
+        "dependencies",
+        &dependencies_json,
+        "--expr",
+        nix_expr,
+    ]);
+    let status = cmd
+        .status()
+        .map_err(|source| DtMgrError::CommandExecution {
+            command: "nix build ...".to_owned(),
+            source,
+        })?;
+
+    if !status.success() {
+        return Err(DtMgrError::CommandStatus {
+            command: "nix build ...".to_owned(),
+            code: status.code(),
+        });
+    };
+
+    make_config_and_var(&dot_dir)
 }
 
 fn run() -> Result<ExitCode, DtMgrError> {
     let cli = Cli::parse();
 
+    let dtmgr_directory = find_dtmgr_directory()?;
+
+    let config = parse_config(dtmgr_directory.join(CONFIG_FILE_NAME))?;
+
+    let dot_dir = dtmgr_directory.join(".dtmgr");
+
     match cli.command {
         Commands::Install {} => {
-            let dtmgr_directory = find_dtmgr_directory()?;
-
-            let config =
-                parse_config(dtmgr_directory.join(CONFIG_FILE_NAME))?;
-
-            let dot_dir = dtmgr_directory.join(".dtmgr");
             if dot_dir.is_dir() {
                 let version_file = dot_dir.join("version");
                 if version_file.is_file() {
-                    let version_contents = std::fs::read_to_string(&version_file)
-                        .map_err(|e| DtMgrError::ReadFile { path: version_file.to_owned(), source: e })?;
+                    let version_contents = std::fs::read_to_string(&version_file).map_err(|e| {
+                        DtMgrError::ReadFile {
+                            path: version_file.to_owned(),
+                            source: e,
+                        }
+                    })?;
                     let config_hash = hash_config(&config)?;
                     if version_contents == config_hash {
                         // TODO do actual logging
@@ -573,59 +871,24 @@ fn run() -> Result<ExitCode, DtMgrError> {
 
                 match std::fs::remove_dir_all(&dot_dir) {
                     Ok(()) => {}
-                    Err(e) => return Err(DtMgrError::RemoveDirectory { dir: dot_dir, source: e })
+                    Err(e) => {
+                        return Err(DtMgrError::RemoveDirectory {
+                            dir: dot_dir,
+                            source: e,
+                        });
+                    }
                 }
             }
-
-            let root = get_texlive_root()?;
-            let platform = get_texlive_platform()?;
 
             // TODO log progress here
             make_dot_dir(&dot_dir)?;
 
-            match install_packages_globally(&config.dependencies) {
-                Err(DtMgrError::CommandStatus { code: Some(2), .. }) => println!("not performing install assuming tlmgr needs sudo. continuing..."),
-                other => other?,
-            };
-
-            let dep_tree = build_dependency_tree(&config, &platform)?;
-            for tlpobj in dep_tree.values() {
-                do_symlinks(&root, &dot_dir, &platform, tlpobj)?;
-            }
-
-            make_config_and_var(&dot_dir)?;
-
-            // TODO turn these expects into errors
-            let mktexlsr_status = run_tool_in_dtmgr(["mktexlsr"])?
-                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
-            if !mktexlsr_status.success() {
-                return Err(DtMgrError::CommandStatus { command: "mktexlsr".to_owned(), code: mktexlsr_status.code() })
-            }
-
-            let fmtutil_missing_status = run_tool_in_dtmgr(["fmtutil-sys", "--missing", "--no-strict"])?
-                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
-            if !fmtutil_missing_status.success() {
-                return Err(DtMgrError::CommandStatus { command: "fmtutil-sys --missing --no-strict".to_owned(), code: fmtutil_missing_status.code() })
-            }
-
-            let mut updmap_sync = run_tool_in_dtmgr(["updmap-sys", "--syncwithtrees"])?
-                .stdin(Stdio::piped())
-                .spawn()
-                .map_err(|e| DtMgrError::CommandExecution { source: e })?;
-            let updmap_sync_stdin = updmap_sync.stdin.as_mut()
-                .expect("should be able to open stdin of subprocess");
-            updmap_sync_stdin.write_all(b"y\n")
-                .expect("should be able to write to stdin of subprocess");
-            let updmap_sync_status = updmap_sync.wait()
-                .map_err(|e| DtMgrError::CommandExecution { source: e })?;
-            if !updmap_sync_status.success() {
-                return Err(DtMgrError::CommandStatus { command: "updmap-sys --syncwithtrees".to_owned(), code: updmap_sync_status.code() })
-            }
-
-            let updmap_status = run_tool_in_dtmgr(["updmap-sys"])?
-                .status().map_err(|e| DtMgrError::CommandExecution { source: e })?;
-            if !updmap_status.success() {
-                return Err(DtMgrError::CommandStatus { command: "updmap-sys".to_owned(), code: updmap_status.code() })
+            if cli.nix {
+                install_via_nix(&config, &dot_dir)?;
+            } else {
+                let root = get_texlive_root()?;
+                let platform = get_texlive_platform()?;
+                install_via_tlmgr(&config, &dot_dir, &root, &platform)?;
             }
 
             make_dot_dir_version_file(&dot_dir, &config)?;
@@ -633,9 +896,15 @@ fn run() -> Result<ExitCode, DtMgrError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Run { program, args } => {
-            let mut cmd = run_tool_in_dtmgr([program].iter().chain(args.iter()))?;
-            let status = cmd.status()
-                .map_err(|e| DtMgrError::CommandExecution { source: e })?;
+            let mut cmd = run_tool_in_dtmgr(
+                &dot_dir,
+                cli.nix,
+                std::iter::once(&program).chain(args.iter()),
+            )?;
+            let status = cmd.status().map_err(|e| DtMgrError::CommandExecution {
+                command: program,
+                source: e,
+            })?;
 
             match status.code() {
                 Some(code) => Ok(ExitCode::from(code as u8)),
@@ -647,7 +916,13 @@ fn run() -> Result<ExitCode, DtMgrError> {
 
 fn main() -> ExitCode {
     run().unwrap_or_else(|err| {
+        // TODO replace this with ariadne or miette or something
         eprintln!("{}", err);
+        let mut source = err.source();
+        while let Some(e) = source {
+            eprintln!("↳ {}", e);
+            source = e.source();
+        }
         ExitCode::FAILURE
     })
 }
