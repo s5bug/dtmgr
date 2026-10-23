@@ -682,8 +682,10 @@ where
     let texmf_var = dot_dir.join("texmf-var");
     if nix {
         // on Nix, font maps are generated for us, so overwriting TEXMFVAR loses fonts we've requested!
-        cmd.env("TEXMFCACHE", &texmf_var);
-        cmd.env("VARTEXFONTS", &texmf_var);
+        // instead of overwriting, whe just set our TEXMFVAR as higher priority: luaotfload still writes there
+        let mut texmf_var = texmf_var.into_os_string();
+        texmf_var.push(KPSE_SEPARATOR.to_string());
+        cmd.env("TEXMFVAR", &texmf_var);
     } else {
         cmd.env("TEXMFVAR", &texmf_var);
     }
