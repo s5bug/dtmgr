@@ -679,7 +679,14 @@ where
         cmd.env("TEXMFCNF", texmfcnf);
     }
 
-    cmd.env("TEXMFVAR", dot_dir.join("texmf-var"));
+    let texmf_var = dot_dir.join("texmf-var");
+    if nix {
+        // on Nix, font maps are generated for us, so overwriting TEXMFVAR loses fonts we've requested!
+        cmd.env("TEXMFCACHE", &texmf_var);
+        cmd.env("VARTEXFONTS", &texmf_var);
+    } else {
+        cmd.env("TEXMFVAR", &texmf_var);
+    }
 
     // for luaotfload
     // TODO this is the wrong behavior on non-Windows systems
