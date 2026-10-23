@@ -24,7 +24,7 @@ tool that could handle the whole process automatically.
 > [!Note]
 > for Nix users: TeX Live as installed by Nix is immutable. `dtmgr` has a
 > special `--nix` flag for Nix usage, seen in `package.nix`.
-> [example of usage in a NixOS config](https://github.com/s5bug/nixos-config/blob/54b7cfec2832007cb1822d3dc3e315800336f1d0/pkgs/dtmgr.nix)
+> [example of usage in a NixOS config](https://github.com/s5bug/nixos-config/blob/761204349887b7b3b04fb3b430a4bc39faa87900/pkgs/dtmgr.nix)
 
 First, create a `dtmgr.toml` in the root of your TeX project. It should list
 packages under `dependencies`:
