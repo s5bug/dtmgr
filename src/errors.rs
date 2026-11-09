@@ -134,4 +134,6 @@ pub enum DtmgrError {
         #[source]
         source: std::io::Error,
     },
+    #[error("isolation is leaking, noticed external path in TeX variables: {path}")]
+    NotIsolated { path: PathBuf },
 }

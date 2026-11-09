@@ -101,10 +101,7 @@ fn cmd_tlmgr(texmfroot: impl AsRef<Path>, architecture: impl AsRef<str>) -> Comm
     Command::new("tlmgr")
 }
 
-fn run_command_success(
-    called: impl AsRef<str>,
-    mut cmd: Command,
-) -> Result<(), DtmgrError> {
+fn run_command_success(called: impl AsRef<str>, mut cmd: Command) -> Result<(), DtmgrError> {
     let status = cmd.status();
 
     match status {
@@ -384,6 +381,46 @@ impl DtmgrInputs {
         })
     }
 
+    pub fn check_isolation(&self, dot_dir: impl AsRef<Path>) -> Result<(), DtmgrError> {
+        const TEXMF_VARS_TO_CHECK: [&'static str; 8] = [
+            "TEXMF",
+            "TEXMFDBS",
+            "TEXMFSYSVAR",
+            "TEXMFSYSCONFIG",
+            "TEXMFVAR",
+            "TEXMFCONFIG",
+            "VARTEXFONTS",
+            "TEXMFCACHE",
+        ];
+
+        let dot_dir = dot_dir.as_ref();
+        let query = TEXMF_VARS_TO_CHECK
+            .map(|v| format!("${v}"))
+            .join(&KPSE_SEPARATOR.to_string());
+
+        let cmd = self.run_tool(
+            dot_dir,
+            ["kpsewhich".to_owned(), format!("-expand-braces={query}")],
+        )?;
+        let out = run_command_success_out("kpsewhich -expand-braces=...", cmd)?;
+        let stdout = String::from_utf8(out.stdout).expect("kpsewhich output is utf-8");
+        for entry in stdout
+            .trim()
+            .split(KPSE_SEPARATOR)
+            .filter(|e| !e.is_empty())
+        {
+            // !!X or X/ or !!X/ becomes X
+            let path = entry.trim_start_matches("!!").trim_end_matches('/');
+            // if this variable doesn't point inside .dtmgr/, we have a problem
+            if !Path::new(path).starts_with(dot_dir) {
+                return Err(DtmgrError::NotIsolated {
+                    path: PathBuf::from(path),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn install(
         &mut self,
         config: &DtmgrConfig,
@@ -427,11 +464,15 @@ impl DtmgrInputs {
 
                 tpd.do_symlinking(texlive_root, &dot_dir)?;
 
+                make_texmf_cnf(&dot_dir)?;
+
                 make_config_and_var(&dot_dir)?;
 
                 tpd.make_dist_lsr(&dot_dir)?;
                 make_updmap_cfg(&dot_dir, &closure)?;
                 make_fmtutil_cnf(&dot_dir, &closure)?;
+
+                self.check_isolation(&dot_dir)?;
 
                 let final_fmtutil = self.run_tool(
                     &dot_dir,
@@ -609,6 +650,36 @@ fn make_dot_dir(dot_dir: impl AsRef<Path>) -> Result<(), DtmgrError> {
     std::fs::create_dir(&dot_dir).map_err(|e| DtmgrError::CreateDirectory {
         dir: dot_dir.as_ref().to_owned(),
         source: e,
+    })
+}
+
+fn make_texmf_cnf(dot_dir: impl AsRef<Path>) -> Result<(), DtmgrError> {
+    let root_unix_slashes = dot_dir
+        .as_ref()
+        .components()
+        .map(|c| c.as_os_str().to_str().expect("paths are utf8"))
+        .collect::<Vec<_>>()
+        .join("/");
+    let texmf_cnf_file = dot_dir.as_ref().join("texmf.cnf");
+
+    let cnf = format!(
+        r#"
+TEXMFROOT = {root_unix_slashes}
+TEXMFDIST = $TEXMFROOT/texmf-dist
+TEXMFMAIN = $TEXMFDIST
+TEXMFLOCAL = $TEXMFROOT/texmf-local
+TEXMFSYSVAR = $TEXMFROOT/texmf-var
+TEXMFSYSCONFIG = $TEXMFROOT/texmf-config
+TEXMF = {{$TEXMFCONFIG,$TEXMFVAR,$TEXMFHOME,!!$TEXMFLOCAL,!!$TEXMFSYSCONFIG,!!$TEXMFSYSVAR,!!$TEXMFDIST}}
+TEXMFDBS = {{!!$TEXMFLOCAL,!!$TEXMFSYSCONFIG,!!$TEXMFSYSVAR,!!$TEXMFDIST}}
+VARTEXFONTS = $TEXMFVAR/fonts
+TEXMFCACHE = $TEXMFVAR
+"#
+    );
+
+    std::fs::write(&texmf_cnf_file, cnf).map_err(|source| DtmgrError::WriteFile {
+        file: texmf_cnf_file,
+        source,
     })
 }
 
