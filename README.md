@@ -1,8 +1,6 @@
 # dtmgr
 
-> [!WARNING]
-> this is very experimental and might completely screw up your TeX
-Live install. use at your own risk.
+Nix-like environments for TeX/LaTeX projects on any platform.
 
 ## motivation
 
@@ -50,8 +48,10 @@ dtmgr run lualatex main.tex
 > you do not use `dtmgr run` for CI commands. this means if using a build file,
 > you likely want to i.e. manually `dtmgr run make` rather than having
 > `Makefile` specify `dtmgr run` as part of steps.
+> [example of usage in GitHub Actions](https://github.com/s5bug/cpsc619-midterm1-cheatsheet/blob/817a74ac1a0130c23f84235f52e48e6a7df6d457/.github/workflows/build-pdf.yml)
 
 ## TODO
 
+- create a project the way I like with `dtmgr new`
 - implement progress logging
 - replace all the `.expect`s with actual error printing
