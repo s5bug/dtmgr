@@ -104,6 +104,30 @@ fn cmd_tlmgr(texmfroot: impl AsRef<Path>, architecture: impl AsRef<str>) -> Comm
 fn run_command_success(
     called: impl AsRef<str>,
     mut cmd: Command,
+) -> Result<(), DtmgrError> {
+    let status = cmd.status();
+
+    match status {
+        Ok(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(DtmgrError::CommandStatus {
+                    command: called.as_ref().to_owned(),
+                    code: status.code(),
+                })
+            }
+        }
+        Err(source) => Err(DtmgrError::CommandExecution {
+            command: called.as_ref().to_owned(),
+            source,
+        }),
+    }
+}
+
+fn run_command_success_out(
+    called: impl AsRef<str>,
+    mut cmd: Command,
 ) -> Result<std::process::Output, DtmgrError> {
     let out = cmd.output();
 
@@ -128,7 +152,7 @@ fn run_command_success(
 fn get_texlive_root() -> Result<PathBuf, DtmgrError> {
     let mut cmd = Command::new("kpsewhich");
     cmd.arg("-var-value=TEXMFROOT");
-    let kpse_out = run_command_success("kpsewhich -var-value=TEXMFROOT", cmd)?;
+    let kpse_out = run_command_success_out("kpsewhich -var-value=TEXMFROOT", cmd)?;
 
     Ok(PathBuf::from(
         String::from_utf8(kpse_out.stdout)
@@ -155,7 +179,7 @@ fn get_texlive_platform(tlpdb: &TlpDb) -> Result<String, DtmgrError> {
     } else {
         let mut tlmgr_platform = Command::new("tlmgr");
         tlmgr_platform.arg("print-platform");
-        let tlmgr_platform_out = run_command_success("tlmgr print-platform", tlmgr_platform)?;
+        let tlmgr_platform_out = run_command_success_out("tlmgr print-platform", tlmgr_platform)?;
         let platform_string = String::from_utf8(tlmgr_platform_out.stdout)
             .expect("tlmgr print-platform produces utf8");
         Ok(platform_string.trim().to_owned())
