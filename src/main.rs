@@ -6,6 +6,7 @@ mod tlpdb;
 use crate::symlink_solver::TexPackageDir;
 use crate::tlpdb::{TlpDb, TlpDbObj};
 use clap::{Parser, Subcommand};
+use digest_io::IoWrapper;
 use errors::DtmgrError;
 use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -97,12 +98,7 @@ fn cmd_tlmgr(texmfroot: impl AsRef<Path>, architecture: impl AsRef<str>) -> Comm
 
 #[cfg(unix)]
 fn cmd_tlmgr(texmfroot: impl AsRef<Path>, architecture: impl AsRef<str>) -> Command {
-    let tlmgr = texmfroot
-        .as_ref()
-        .join("bin")
-        .join(architecture.as_ref())
-        .join("tlmgr");
-    Command::new(tlmgr)
+    Command::new("tlmgr")
 }
 
 fn run_command_success(
@@ -141,17 +137,29 @@ fn get_texlive_root() -> Result<PathBuf, DtmgrError> {
     ))
 }
 
-// TODO this is wrong on certain Linux systems but I can't figure out why right now
 fn get_texlive_platform(tlpdb: &TlpDb) -> Result<String, DtmgrError> {
     let maybe_platform = tlpdb.with_packages(|p| {
-        let installation_pkg = &p["00texlive.installation"];
+        let installation_pkg = p.get("00texlive.installation")?;
         installation_pkg
             .depends
             .iter()
             .find_map(|d| d.strip_prefix("setting_available_architectures:"))
             .map(|r| r.to_owned())
     });
-    maybe_platform.ok_or(DtmgrError::MissingPlatform)
+    if let Some(platform) = maybe_platform
+        && !platform.contains(' ')
+    {
+        Ok(platform)
+    } else if cfg!(windows) {
+        Ok("windows".to_owned())
+    } else {
+        let mut tlmgr_platform = Command::new("tlmgr");
+        tlmgr_platform.arg("print-platform");
+        let tlmgr_platform_out = run_command_success("tlmgr print-platform", tlmgr_platform)?;
+        let platform_string = String::from_utf8(tlmgr_platform_out.stdout)
+            .expect("tlmgr print-platform produces utf8");
+        Ok(platform_string.trim().to_owned())
+    }
 }
 
 fn make_updmap_cfg(
@@ -271,6 +279,13 @@ enum DtmgrInputs {
     Nix,
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum DtmgrHashResult {
+    Match,
+    NoMatch,
+    Missing,
+}
+
 impl DtmgrInputs {
     pub fn tlmgr() -> Result<DtmgrInputs, DtmgrError> {
         let texlive_root = get_texlive_root()?;
@@ -290,21 +305,59 @@ impl DtmgrInputs {
     }
 
     pub fn hash_state(&self, config: &DtmgrConfig) -> Result<String, DtmgrError> {
-        let mut hasher = Sha3_256::new();
+        let mut hasher = IoWrapper(Sha3_256::new());
 
         if let Self::Tlmgr { tlpdb, .. } = self {
-            let tlpdb_bytes = tlpdb
-                .with_packages(|p| postcard::to_stdvec(&p))
+            _ = tlpdb
+                .with_packages(|p| postcard::to_io(&p, &mut hasher))
                 .map_err(|source| DtmgrError::HashConfig { source })?;
-            hasher.update(tlpdb_bytes);
         }
 
-        let config_bytes =
-            postcard::to_stdvec(&config).map_err(|source| DtmgrError::HashConfig { source })?;
-        hasher.update(config_bytes);
+        _ = postcard::to_io(&config, &mut hasher)
+            .map_err(|source| DtmgrError::HashConfig { source })?;
 
-        let hash: [u8; 32] = hasher.finalize().into();
+        let hash: [u8; 32] = hasher.0.finalize().into();
         Ok(hex::encode(hash))
+    }
+
+    pub fn check_hash(
+        &self,
+        dot_dir: impl AsRef<Path>,
+        config: &DtmgrConfig,
+    ) -> Result<DtmgrHashResult, DtmgrError> {
+        let version_file = dot_dir.as_ref().join("version");
+        let version_contents = match std::fs::read_to_string(&version_file) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DtmgrHashResult::Missing);
+            }
+            Err(source) => {
+                return Err(DtmgrError::ReadFile {
+                    path: version_file,
+                    source,
+                });
+            }
+        };
+
+        let config_hash = self.hash_state(config)?;
+        if version_contents == config_hash {
+            Ok(DtmgrHashResult::Match)
+        } else {
+            Ok(DtmgrHashResult::NoMatch)
+        }
+    }
+
+    pub fn write_hash(
+        &self,
+        dot_dir: impl AsRef<Path>,
+        config: &DtmgrConfig,
+    ) -> Result<(), DtmgrError> {
+        let version_file = dot_dir.as_ref().join("version");
+        let config_hash = self.hash_state(&config)?;
+        std::fs::write(&version_file, config_hash).map_err(|e| DtmgrError::WriteFile {
+            file: version_file,
+            source: e,
+        })
     }
 
     pub fn install(
@@ -356,9 +409,8 @@ impl DtmgrInputs {
                 make_updmap_cfg(&dot_dir, &closure)?;
                 make_fmtutil_cnf(&dot_dir, &closure)?;
 
-                let final_fmtutil = run_tool_in_dtmgr(
+                let final_fmtutil = self.run_tool(
                     &dot_dir,
-                    false,
                     ["fmtutil-sys", "--missing", "--no-strict", "--nohash"],
                 )?;
                 _ = run_command_success(
@@ -366,8 +418,7 @@ impl DtmgrInputs {
                     final_fmtutil,
                 )?;
 
-                let final_updmap_sys =
-                    run_tool_in_dtmgr(&dot_dir, false, ["updmap-sys", "--nohash"])?;
+                let final_updmap_sys = self.run_tool(&dot_dir, ["updmap-sys", "--nohash"])?;
                 _ = run_command_success("updmap-sys --nohash", final_updmap_sys)?;
 
                 Ok(())
@@ -409,49 +460,115 @@ impl DtmgrInputs {
             }
         }
     }
+
+    pub fn run_tool<I, S>(
+        &self,
+        dot_dir: impl AsRef<Path>,
+        exe_and_args: I,
+    ) -> Result<Command, DtmgrError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let dot_dir = dot_dir.as_ref();
+        let dot_dir_str = dot_dir.to_str().expect(".dtmgr path should be a str");
+
+        // TODO route this back to powershell
+        let mut exe_args_iter = exe_and_args.into_iter();
+        let mut cmd = Command::new(exe_args_iter.next().expect("there's an exe"));
+        cmd.args(exe_args_iter);
+
+        // TODO maybe this needs a cfg()
+        let old_path = std::env::var("PATH").expect("there should be a PATH variable");
+
+        // TODO move this to function parameter
+        let new_path = if let DtmgrInputs::Tlmgr {
+            texlive_root,
+            architecture,
+            ..
+        } = self
+        {
+            // otherwise we have to hide the system installation of TeX utilities
+            let old_bin = texlive_root.join("bin").join(architecture);
+            let new_bin = dot_dir.join("bin").join(architecture);
+            replace_path_env(&old_path, &old_bin, &new_bin)
+        } else {
+            // on Nix, we assume no system-level installation of TeX Live
+            let texlive_bin = dot_dir.join("nix-texlive").join("bin");
+
+            let mut paths = vec![texlive_bin];
+            paths.extend(std::env::split_paths(&old_path));
+            std::env::join_paths(paths)
+                .expect("prepending a path to PATH should result in a valid PATH")
+        };
+        cmd.env("PATH", &new_path);
+
+        let texmf_var = dot_dir.join("texmf-var");
+        let texmf_config = dot_dir.join("texmf-config");
+        cmd.env("TEXMFVAR", &texmf_var);
+        cmd.env("TEXMFCONFIG", &texmf_config);
+
+        if let DtmgrInputs::Tlmgr { .. } = self {
+            // outside a Nix environment, we have to force tools to search the right place for other tools
+            let dot_dir_web2c = dot_dir.join("texmf-dist").join("web2c");
+            let dot_dir_web2c_str = dot_dir_web2c
+                .to_str()
+                .expect(".dtmgr/texmf-dist/web2c should be a str");
+
+            // TODO move this to function parameter
+            let mut texmfcnf = String::new();
+            texmfcnf.push_str(dot_dir_str);
+            texmfcnf.push(KPSE_SEPARATOR);
+            texmfcnf.push_str(dot_dir_web2c_str);
+            cmd.env("TEXMFCNF", texmfcnf);
+        }
+
+        // for luaotfload
+        let xdg_config = dot_dir.join("xdg-config");
+        cmd.env("XDG_CONFIG_HOME", &xdg_config);
+
+        // don't index OS fonts, instead require them in the project
+        let dot_dir_nonexistent =
+            dot_dir.join(".if-this-directory-exists-it-needs-to-be-empty-or-dtmgr-will-not-work");
+        cmd.env("OSFONTDIR", &dot_dir_nonexistent);
+
+        // prevent ~/texmf from having an effect
+        cmd.env("TEXMFHOME", &dot_dir_nonexistent);
+
+        Ok(cmd)
+    }
 }
 
-fn install_packages_globally<'a, I, S>(
+fn install_packages_globally<I, S>(
     texmfroot: impl AsRef<Path>,
     architecture: impl AsRef<str>,
     packages: I,
 ) -> Result<(), DtmgrError>
 where
-    I: IntoIterator<Item = &'a S>,
-    S: AsRef<str> + 'a,
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
 {
-    let mut packages_vec: Vec<&'a str> = Vec::new();
-    for package in packages.into_iter() {
-        packages_vec.push(package.as_ref());
-    }
+    // take ownership of the iterator data
+    let packages: Vec<S> = packages.into_iter().collect();
+    // create a vec of string borrows
+    let args: Vec<&str> = packages.iter().map(S::as_ref).collect();
 
     let mut cmd = cmd_tlmgr(texmfroot, architecture);
     cmd.arg("install");
-    cmd.args(&packages_vec);
-    _ = run_command_success(
-        "tlmgr install ".to_owned() + packages_vec.join(" ").as_str(),
-        cmd,
-    )?;
-
+    cmd.args(&args);
+    _ = run_command_success(format!("tlmgr install {}", args.join(" ")), cmd)?;
     Ok(())
 }
 
 fn find_dtmgr_directory() -> Result<PathBuf, DtmgrError> {
-    let initial: &Path =
-        &*std::env::current_dir().map_err(|e| DtmgrError::CurrentDirectory { source: e })?;
-    let mut cwd: Option<&Path> = Some(initial);
+    let initial =
+        std::env::current_dir().map_err(|source| DtmgrError::CurrentDirectory { source })?;
 
-    while let Some(here) = cwd {
-        if here.join(CONFIG_FILE_NAME).exists() {
-            return Ok(PathBuf::from(here));
-        }
-
-        cwd = here.parent();
-    }
-
-    Err(DtmgrError::FindConfig {
-        cwd: initial.to_owned(),
-    })
+    initial
+        .ancestors()
+        .find(|dir| dir.join(CONFIG_FILE_NAME).is_file())
+        .map(Path::to_path_buf)
+        .ok_or(DtmgrError::FindConfig { cwd: initial })
 }
 
 fn parse_config(path_to_dtmgr_toml: impl AsRef<Path>) -> Result<DtmgrConfig, DtmgrError> {
@@ -532,93 +649,22 @@ fn replace_path_env(
     let mut result = Vec::new();
 
     // TODO check for non-existence of target
+    let mut found = false;
     for part in std::env::split_paths(old_path_env.as_ref()) {
         let entry = PathBuf::from(part);
-        let new_path = if entry.starts_with(&target) {
-            let relative = entry
-                .strip_prefix(&target)
-                .expect("strip_prefix failed even though starts_with already checked");
+        let new_path = if let Ok(relative) = entry.strip_prefix(&target) {
+            found = true;
             replacement.as_ref().join(relative)
         } else {
             entry
         };
         result.push(new_path.into_os_string());
     }
-
-    std::env::join_paths(result).expect("replacing path shouldn't create invalid path")
-}
-
-// TODO move this to an instance method on DtmgrInputs
-fn run_tool_in_dtmgr<I, S>(
-    dot_dir: impl AsRef<Path>,
-    nix: bool,
-    exe_and_args: I,
-) -> Result<Command, DtmgrError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let dot_dir = dot_dir.as_ref();
-    let dot_dir_str = dot_dir.to_str().expect(".dtmgr path should be a str");
-
-    // TODO route this back to powershell
-    let mut exe_args_iter = exe_and_args.into_iter();
-    let mut cmd = Command::new(exe_args_iter.next().expect("there's an exe"));
-    cmd.args(exe_args_iter);
-
-    // TODO maybe this needs a cfg()
-    let old_path = std::env::var("PATH").expect("there should be a PATH variable");
-
-    // TODO move this to function parameter
-    let new_path = if nix {
-        // on Nix, we assume no system-level installation of TeX Live
-        let texlive_bin = dot_dir.join("nix-texlive").join("bin");
-
-        let mut paths = vec![texlive_bin];
-        paths.extend(std::env::split_paths(&old_path));
-        std::env::join_paths(paths)
-            .expect("prepending a path to PATH should result in a valid PATH")
-    } else {
-        // otherwise we have to hide the system installation of TeX utilities
-        // TODO move this to function parameter
-        let old_root = get_texlive_root()?;
-        replace_path_env(&old_path, &old_root, &dot_dir)
-    };
-    cmd.env("PATH", &new_path);
-
-    let texmf_var = dot_dir.join("texmf-var");
-    let texmf_config = dot_dir.join("texmf-config");
-    cmd.env("TEXMFVAR", &texmf_var);
-    cmd.env("TEXMFCONFIG", &texmf_config);
-
-    if !nix {
-        // outside a Nix environment, we have to force tools to search the right place for other tools
-        let dot_dir_web2c = dot_dir.join("texmf-dist").join("web2c");
-        let dot_dir_web2c_str = dot_dir_web2c
-            .to_str()
-            .expect(".dtmgr/texmf-dist/web2c should be a str");
-
-        // TODO move this to function parameter
-        let mut texmfcnf = String::new();
-        texmfcnf.push_str(dot_dir_str);
-        texmfcnf.push(KPSE_SEPARATOR);
-        texmfcnf.push_str(dot_dir_web2c_str);
-        cmd.env("TEXMFCNF", texmfcnf);
+    if !found {
+        result.insert(0, replacement.as_ref().to_owned().into_os_string());
     }
 
-    // for luaotfload
-    let xdg_config = dot_dir.join("xdg-config");
-    cmd.env("XDG_CONFIG_HOME", &xdg_config);
-
-    // don't index OS fonts, instead require them in the project
-    let dot_dir_nonexistent =
-        dot_dir.join(".if-this-directory-exists-it-needs-to-be-empty-or-dtmgr-will-not-work");
-    cmd.env("OSFONTDIR", &dot_dir_nonexistent);
-
-    // prevent ~/texmf from having an effect
-    cmd.env("TEXMFHOME", &dot_dir_nonexistent);
-
-    Ok(cmd)
+    std::env::join_paths(result).expect("replacing path shouldn't create invalid path")
 }
 
 fn run() -> Result<ExitCode, DtmgrError> {
@@ -638,30 +684,19 @@ fn run() -> Result<ExitCode, DtmgrError> {
                 DtmgrInputs::tlmgr()?
             };
 
-            if dot_dir.is_dir() {
-                let version_file = dot_dir.join("version");
-                if version_file.is_file() {
-                    let version_contents = std::fs::read_to_string(&version_file).map_err(|e| {
-                        DtmgrError::ReadFile {
-                            path: version_file.to_owned(),
-                            source: e,
-                        }
-                    })?;
-                    let config_hash = dtmgr_inputs.hash_state(&config)?;
-                    if version_contents == config_hash {
-                        info!("up-to-date");
-                        return Ok(ExitCode::SUCCESS);
-                    }
-                }
+            if dtmgr_inputs.check_hash(&dot_dir, &config)? == DtmgrHashResult::Match {
+                info!("up-to-date");
+                return Ok(ExitCode::SUCCESS);
+            }
 
-                match std::fs::remove_dir_all(&dot_dir) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        return Err(DtmgrError::RemoveDirectory {
-                            dir: dot_dir,
-                            source: e,
-                        });
-                    }
+            match std::fs::remove_dir_all(&dot_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(DtmgrError::RemoveDirectory {
+                        dir: dot_dir,
+                        source: e,
+                    });
                 }
             }
 
@@ -670,21 +705,31 @@ fn run() -> Result<ExitCode, DtmgrError> {
 
             dtmgr_inputs.install(&config, &dot_dir)?;
 
-            let version_file = dot_dir.join("version");
-            let config_hash = dtmgr_inputs.hash_state(&config)?;
-            std::fs::write(&version_file, config_hash).map_err(|e| DtmgrError::WriteFile {
-                file: version_file,
-                source: e,
-            })?;
+            dtmgr_inputs.write_hash(&dot_dir, &config)?;
 
             Ok(ExitCode::SUCCESS)
         }
         Commands::Run { program, args } => {
-            let mut cmd = run_tool_in_dtmgr(
-                &dot_dir,
-                cli.nix,
-                std::iter::once(&program).chain(args.iter()),
-            )?;
+            let dtmgr_inputs = if cli.nix {
+                DtmgrInputs::nix()?
+            } else {
+                DtmgrInputs::tlmgr()?
+            };
+
+            match dtmgr_inputs.check_hash(&dot_dir, &config)? {
+                DtmgrHashResult::Match => {}
+                DtmgrHashResult::NoMatch => {
+                    warn!("`dtmgr install` appears to be outdated from the current config");
+                    warn!("continuing anyway...");
+                }
+                DtmgrHashResult::Missing => {
+                    error!("could not find dtmgr data: did you remember to run `dtmgr install`?");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+
+            let mut cmd =
+                dtmgr_inputs.run_tool(&dot_dir, std::iter::once(&program).chain(args.iter()))?;
             let status = cmd.status().map_err(|e| DtmgrError::CommandExecution {
                 command: program,
                 source: e,
