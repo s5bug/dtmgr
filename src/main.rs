@@ -141,6 +141,7 @@ fn get_texlive_root() -> Result<PathBuf, DtmgrError> {
     ))
 }
 
+// TODO this is wrong on certain Linux systems but I can't figure out why right now
 fn get_texlive_platform(tlpdb: &TlpDb) -> Result<String, DtmgrError> {
     let maybe_platform = tlpdb.with_packages(|p| {
         let installation_pkg = &p["00texlive.installation"];
