@@ -27,6 +27,12 @@ pub enum TexPackageFile {
 // FIXME https://github.com/lunarmodules/luafilesystem/issues/184
 const FONT_EXTENSIONS: [&str; 5] = ["otf", "ttc", "ttf", "afm", "pfb"];
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum Relocation {
+    Relocatable,
+    Fixed,
+}
+
 impl<'a> TexPackageDir<'a> {
     pub fn from_wanted(
         whole_database: &'a TlpDb,
@@ -51,10 +57,11 @@ impl<'a> TexPackageDir<'a> {
                 } else {
                     TexPackageFile::default()
                 };
-                root.mark_file_wanted(binfile, package_file);
+
+                root.mark_file_wanted(binfile, package_file, Relocation::Relocatable);
             }
             for &docfile in v.docfiles.iter() {
-                root.mark_file_wanted(docfile, TexPackageFile::default());
+                root.mark_file_wanted(docfile, TexPackageFile::default(), Relocation::Relocatable);
             }
             for &runfile in v.runfiles.iter() {
                 let package_file =
@@ -70,10 +77,10 @@ impl<'a> TexPackageDir<'a> {
                     } else {
                         TexPackageFile::default()
                     };
-                root.mark_file_wanted(runfile, package_file);
+                root.mark_file_wanted(runfile, package_file, Relocation::Relocatable);
             }
             for &srcfile in v.srcfiles.iter() {
-                root.mark_file_wanted(srcfile, TexPackageFile::default());
+                root.mark_file_wanted(srcfile, TexPackageFile::default(), Relocation::Relocatable);
             }
         }
 
@@ -92,16 +99,16 @@ impl<'a> TexPackageDir<'a> {
                 .into_iter()
                 .flatten()
             {
-                root.mark_file_unwanted(binfile)
+                root.mark_file_unwanted(binfile, Relocation::Relocatable)
             }
             for &docfile in v.docfiles.iter() {
-                root.mark_file_unwanted(docfile)
+                root.mark_file_unwanted(docfile, Relocation::Relocatable)
             }
             for &runfile in v.runfiles.iter() {
-                root.mark_file_unwanted(runfile)
+                root.mark_file_unwanted(runfile, Relocation::Relocatable)
             }
             for &srcfile in v.srcfiles.iter() {
-                root.mark_file_unwanted(srcfile)
+                root.mark_file_unwanted(srcfile, Relocation::Relocatable)
             }
         }
 
@@ -143,16 +150,28 @@ impl<'a> TexPackageDir<'a> {
         }
     }
 
-    fn mark_file_wanted(&mut self, path: &'a str, package_file: TexPackageFile) {
+    fn mark_file_wanted(
+        &mut self,
+        path: &'a str,
+        package_file: TexPackageFile,
+        relocation: Relocation,
+    ) {
         // we create entries for wanted files
         if package_file != TexPackageFile::default() {
             self.has_special = true;
         }
 
         if let Some((dir, rest)) = path.split_once('/') {
+            let dir = if relocation == Relocation::Relocatable && dir == "RELOC" {
+                // relocatable entries belong in texmf-dist
+                "texmf-dist"
+            } else {
+                dir
+            };
+
             let child = self.children.entry(dir).or_insert(Ok(Default::default()));
             if let Ok(dir) = child.as_mut() {
-                dir.mark_file_wanted(rest, package_file);
+                dir.mark_file_wanted(rest, package_file, Relocation::Fixed);
             } else {
                 unreachable!("tlpdb is malformed: file and directory share a path")
             }
@@ -161,13 +180,20 @@ impl<'a> TexPackageDir<'a> {
         }
     }
 
-    fn mark_file_unwanted(&mut self, path: &str) {
+    fn mark_file_unwanted(&mut self, path: &str, relocation: Relocation) {
         // we don't create entries for unwanted files
         // if a directory has no wanted files, we don't have to traverse it later
         if let Some((dir, rest)) = path.split_once('/') {
+            let dir = if relocation == Relocation::Relocatable && dir == "RELOC" {
+                // relocatable entries belong in texmf-dist
+                "texmf-dist"
+            } else {
+                dir
+            };
+
             if let Some(child) = self.children.get_mut(dir) {
                 if let Ok(child_dir) = child.as_mut() {
-                    child_dir.mark_file_unwanted(rest)
+                    child_dir.mark_file_unwanted(rest, Relocation::Fixed);
                 }
             }
         }
