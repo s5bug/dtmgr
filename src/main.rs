@@ -18,6 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use path_slash::PathExt;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -656,10 +657,8 @@ fn make_dot_dir(dot_dir: impl AsRef<Path>) -> Result<(), DtmgrError> {
 fn make_texmf_cnf(dot_dir: impl AsRef<Path>) -> Result<(), DtmgrError> {
     let root_unix_slashes = dot_dir
         .as_ref()
-        .components()
-        .map(|c| c.as_os_str().to_str().expect("paths are utf8"))
-        .collect::<Vec<_>>()
-        .join("/");
+        .to_slash()
+        .expect("paths are utf8");
     let texmf_cnf_file = dot_dir.as_ref().join("texmf.cnf");
 
     let cnf = format!(
@@ -677,7 +676,7 @@ TEXMFCACHE = $TEXMFVAR
 "#
     );
 
-    std::fs::write(&texmf_cnf_file, cnf).map_err(|source| DtmgrError::WriteFile {
+    std::fs::write(&texmf_cnf_file, cnf.trim_start()).map_err(|source| DtmgrError::WriteFile {
         file: texmf_cnf_file,
         source,
     })
