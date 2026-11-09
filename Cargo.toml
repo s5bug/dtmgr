@@ -19,3 +19,4 @@ thiserror = "2.0.21"
 toml = "1.2.1"
 tracing = { version = "0.1.44", features = ["release_max_level_debug", "max_level_trace"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+which = "8.0.6"

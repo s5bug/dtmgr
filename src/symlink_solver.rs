@@ -238,15 +238,25 @@ impl TexPackageFile {
         old_root: impl AsRef<Path>,
         new_root: impl AsRef<Path>,
     ) -> Result<(), DtmgrError> {
+        let old_root = old_root.as_ref();
+        let resolved_old = if !old_root.exists()
+            && let Some(old_file_name) = old_root.file_name()
+            && let Ok(on_path) = which::which(old_file_name)
+        {
+            on_path
+        } else {
+            old_root.to_owned()
+        };
+
         match self {
-            TexPackageFile::Symlink => create_file_symlink(old_root, new_root),
-            TexPackageFile::Hardlink => match std::fs::hard_link(&old_root, &new_root) {
+            TexPackageFile::Symlink => create_file_symlink(resolved_old, new_root),
+            TexPackageFile::Hardlink => match std::fs::hard_link(&resolved_old, &new_root) {
                 Ok(()) => Ok(()),
-                Err(_) => TexPackageFile::Copy.do_symlinking(old_root, new_root),
+                Err(_) => TexPackageFile::Copy.do_symlinking(resolved_old, new_root),
             },
             TexPackageFile::Copy => {
-                std::fs::copy(&old_root, &new_root).map_err(|source| DtmgrError::Copy {
-                    src: old_root.as_ref().to_owned(),
+                std::fs::copy(&resolved_old, &new_root).map_err(|source| DtmgrError::Copy {
+                    src: resolved_old,
                     dst: new_root.as_ref().to_owned(),
                     source,
                 })?;
