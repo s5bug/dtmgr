@@ -399,10 +399,8 @@ impl DtmgrInputs {
             .map(|v| format!("${v}"))
             .join(&KPSE_SEPARATOR.to_string());
 
-        let cmd = self.run_tool(
-            dot_dir,
-            ["kpsewhich".to_owned(), format!("-expand-braces={query}")],
-        )?;
+        let flag = format!("-expand-braces={query}");
+        let cmd = self.run_tool(dot_dir, ["kpsewhich", &flag])?;
         let out = run_command_success_out("kpsewhich -expand-braces=...", cmd)?;
         let stdout = String::from_utf8(out.stdout).expect("kpsewhich output is utf-8");
         for entry in stdout
@@ -545,7 +543,7 @@ impl DtmgrInputs {
         cmd.args(exe_args_iter);
 
         // TODO maybe this needs a cfg()
-        let old_path = std::env::var("PATH").expect("there should be a PATH variable");
+        let old_path = std::env::var_os("PATH").expect("there should be a PATH variable");
 
         // TODO move this to function parameter
         let new_path = if let DtmgrInputs::Tlmgr {
@@ -562,10 +560,10 @@ impl DtmgrInputs {
             // on Nix, we assume no system-level installation of TeX Live
             let texlive_bin = dot_dir.join("nix-texlive").join("bin");
 
-            let mut paths = vec![texlive_bin];
-            paths.extend(std::env::split_paths(&old_path));
-            std::env::join_paths(paths)
-                .expect("prepending a path to PATH should result in a valid PATH")
+            std::env::join_paths(
+                std::iter::once(texlive_bin).chain(std::env::split_paths(&old_path)),
+            )
+            .expect("prepending a path to PATH should result in a valid PATH")
         };
         cmd.env("PATH", &new_path);
 
@@ -715,21 +713,13 @@ fn build_dependency_tree<'a>(
     tlpdb: &'a TlpDb,
     architecture: impl AsRef<str>,
 ) -> Map<&'a str, &'a TlpDbObj<'a>> {
-    // TODO reduce the amount of cloning here
-    let mut queue: Set<String> = Set::new();
-    queue.insert(String::from("texlive.infra"));
-    queue.insert(String::from("kpathsea"));
+    let wanted = ["texlive.infra", "kpathsea"]
+        .into_iter()
+        // TODO check this for other platforms
+        .chain(cfg!(windows).then_some("tlperl.windows"))
+        .chain(config.dependencies.iter().map(String::as_str));
 
-    // TODO check this for other platforms
-    if cfg!(windows) {
-        queue.insert(String::from("tlperl.windows"));
-    }
-
-    for dep in config.dependencies.iter() {
-        queue.insert(dep.clone());
-    }
-
-    tlpdb.closure(queue, architecture)
+    tlpdb.closure(wanted, architecture)
 }
 
 fn replace_path_env(

@@ -2,6 +2,7 @@ use crate::errors::DtmgrError;
 use crate::symlink;
 use crate::symlink::create_file_symlink;
 use crate::tlpdb::{TlpDb, TlpDbObj};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -19,6 +20,8 @@ pub enum TexPackageFile {
     #[default]
     Symlink,
     Hardlink,
+    BinSymlink,
+    BinHardlink,
     Copy,
     Skip,
 }
@@ -40,22 +43,16 @@ impl<'a> TexPackageDir<'a> {
         closure: &BTreeMap<&'a str, &'a TlpDbObj<'a>>,
     ) -> TexPackageDir<'a> {
         let mut root = TexPackageDir::default();
-        for (&k, &v) in closure {
+        for &v in closure.values() {
             // we must mark every file in the closure as wanted
 
-            for &binfile in v
-                .binfiles
-                .get(architecture.as_ref())
-                .as_deref()
-                .into_iter()
-                .flatten()
-            {
+            for &binfile in v.binfiles.get(architecture.as_ref()).into_iter().flatten() {
                 let package_file = if binfile.ends_with("kpsewhich")
                     || (cfg!(windows) && binfile.ends_with("kpsewhich.exe"))
                 {
-                    TexPackageFile::Hardlink
+                    TexPackageFile::BinHardlink
                 } else {
-                    TexPackageFile::default()
+                    TexPackageFile::BinSymlink
                 };
 
                 root.mark_file_wanted(binfile, package_file, Relocation::Relocatable);
@@ -169,7 +166,10 @@ impl<'a> TexPackageDir<'a> {
                 dir
             };
 
-            let child = self.children.entry(dir).or_insert(Ok(Default::default()));
+            let child = self
+                .children
+                .entry(dir)
+                .or_insert_with(|| Ok(Default::default()));
             if let Ok(dir) = child.as_mut() {
                 dir.mark_file_wanted(rest, package_file, Relocation::Fixed);
             } else {
@@ -259,36 +259,52 @@ impl<'a> TexPackageDir<'a> {
 }
 
 impl TexPackageFile {
+    fn is_bin(&self) -> bool {
+        match self {
+            TexPackageFile::BinSymlink | TexPackageFile::BinHardlink => true,
+            _ => false,
+        }
+    }
+
     fn do_symlinking(
         &self,
         old_root: impl AsRef<Path>,
         new_root: impl AsRef<Path>,
     ) -> Result<(), DtmgrError> {
+        if *self == TexPackageFile::Skip {
+            return Ok(());
+        }
+
         let old_root = old_root.as_ref();
-        let resolved_old = if !old_root.exists()
+        let resolved_old = if self.is_bin()
+            && !old_root.exists()
             && let Some(old_file_name) = old_root.file_name()
             && let Ok(on_path) = which::which(old_file_name)
         {
-            on_path
+            Cow::Owned(on_path)
         } else {
-            old_root.to_owned()
+            Cow::Borrowed(old_root)
         };
 
         match self {
-            TexPackageFile::Symlink => create_file_symlink(resolved_old, new_root),
-            TexPackageFile::Hardlink => match std::fs::hard_link(&resolved_old, &new_root) {
-                Ok(()) => Ok(()),
-                Err(_) => TexPackageFile::Copy.do_symlinking(resolved_old, new_root),
-            },
+            TexPackageFile::Symlink | TexPackageFile::BinSymlink => {
+                create_file_symlink(resolved_old, new_root)
+            }
+            TexPackageFile::Hardlink | TexPackageFile::BinHardlink => {
+                match std::fs::hard_link(&resolved_old, &new_root) {
+                    Ok(()) => Ok(()),
+                    Err(_) => TexPackageFile::Copy.do_symlinking(resolved_old, new_root),
+                }
+            }
             TexPackageFile::Copy => {
                 std::fs::copy(&resolved_old, &new_root).map_err(|source| DtmgrError::Copy {
-                    src: resolved_old,
+                    src: resolved_old.into_owned(),
                     dst: new_root.as_ref().to_owned(),
                     source,
                 })?;
                 Ok(())
             }
-            TexPackageFile::Skip => Ok(()),
+            TexPackageFile::Skip => unreachable!(),
         }
     }
 }
