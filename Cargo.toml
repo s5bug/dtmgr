@@ -1,10 +1,10 @@
 [package]
 name = "dtmgr"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.9", features = ["derive"] }
 const_format = { version = "0.2.37", features = ["fmt"] }
 digest-io = "0.1.0"
 hex = "0.4.3"
@@ -21,3 +21,16 @@ toml = "1.2.1"
 tracing = { version = "0.1.44", features = ["release_max_level_debug", "max_level_trace"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 which = "8.0.6"
+
+# enable a small amount of optimization in the dev profile
+[profile.dev]
+opt-level = 1
+
+# enable a large amount of optimization in the dev profile for dependencies
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+# compile the entire crate as one unit, marginal improvements
+codegen-units = 1
+lto = "thin"
